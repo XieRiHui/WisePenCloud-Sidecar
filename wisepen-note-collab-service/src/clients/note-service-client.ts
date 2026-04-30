@@ -1,13 +1,18 @@
 import axios, { AxiosInstance } from 'axios';
 import { getNoteServiceUrl, getResourceServiceUrl } from '../nacos/registry';
+import { config } from '../config';
 import { R, ResourceCheckPermissionResDTO, SnapshotResponse } from '../types';
+
+function fromSourceHeader(): Record<string, string> {
+  return { 'X-From-Source': config.security.fromSourceSecret };
+}
 
 export async function getNoteServiceClient(): Promise<AxiosInstance> {
   const baseURL = await getNoteServiceUrl();
   return axios.create({
     baseURL,
     timeout: 10000,
-    headers: { 'X-From-Source': 'APISIX-wX0iR6tY' } 
+    headers: fromSourceHeader(),
   });
 }
 
@@ -16,7 +21,7 @@ export async function getResourceServiceClient(): Promise<AxiosInstance> {
   return axios.create({
     baseURL,
     timeout: 10000,
-    headers: { 'X-From-Source': 'APISIX-wX0iR6tY' } 
+    headers: fromSourceHeader(),
   });
 }
 

@@ -46,27 +46,32 @@ pipeline {
             steps {
                 script {
                     echo "开始部署 Sidecar 最新版本: ${IMAGE_TAG} ..."
-                    
-                    // 进入你截图中的 deploy 目录
-                    dir('./') {
-                        sh """
-                        # 如果没有 docker-compose，则静默下载最新独立版
-                        if ! command -v docker-compose &> /dev/null; then
-                            echo "容器内缺失 docker-compose，正在自动下载..."
-                            curl -L -# -o /usr/local/bin/docker-compose "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)"
-                            chmod +x /usr/local/bin/docker-compose
-                        fi
 
-                        # 导出环境变量，供同目录下的 docker-compose.yml 抓取 (替代 .env)
-                        export APP_VERSION=${IMAGE_TAG}
-                        export DOCKER_REGISTRY=${DOCKER_REGISTRY}
-                        export NACOS_USERNAME=\${NACOS_USER}
-                        export NACOS_PASSWORD=\${NACOS_PWD}
+                    sh """
+                    # 如果没有 docker-compose，则静默下载最新独立版
+                    if ! command -v docker-compose &> /dev/null; then
+                        echo "容器内缺失 docker-compose，正在自动下载..."
+                        curl -L -# -o /usr/local/bin/docker-compose "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)"
+                        chmod +x /usr/local/bin/docker-compose
+                    fi
 
-                        # 启动独立部署，并清理旧容器
-                        docker-compose up -d --remove-orphans
-                        """
-                    }
+                    export APP_VERSION=${IMAGE_TAG}
+                    export DOCKER_REGISTRY=${DOCKER_REGISTRY}
+                    export NACOS_USERNAME=\${NACOS_USER}
+                    export NACOS_PASSWORD=\${NACOS_PWD}
+
+                    # 网络兼容
+                    # 检测到遗留 cloud-infra_cloud-net 时叠加 legacy-net overlay
+                    # 老中间件全部下线后，本脚本可以与docker-compose-app.legacy-net.yml文件、部署脚本中的探测分支一并删除
+                    docker network create wisepen-net 2>/dev/null || true
+                    COMPOSE_FILES="-f docker-compose-app.yml"
+                    if docker network inspect cloud-infra_cloud-net >/dev/null 2>&1; then
+                        echo "检测到遗留网络 cloud-infra_cloud-net，叠加 docker-compose-app.legacy-net.yml"
+                        COMPOSE_FILES="\$COMPOSE_FILES -f docker-compose-app.legacy-net.yml"
+                    fi
+
+                    docker-compose \$COMPOSE_FILES up -d --remove-orphans
+                    """
                 }
             }
         }

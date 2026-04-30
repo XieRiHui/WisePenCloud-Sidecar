@@ -1,0 +1,51 @@
+# Node / pnpm 构建产物
+node_modules/
+dist/
+build/
+out/
+*.tsbuildinfo
+.turbo/
+
+# 日志（与 docker-compose-app.yml 中 ../logs/* 挂载点对齐）
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# 测试 / 覆盖率
+coverage/
+*.lcov
+.nyc_output/
+
+# 环境变量 / 凭证
+.env
+.env.local
+.env.*.local
+.env.test
+.env.production
+.env.development.local
+.env.test.local
+.env.production.local
+!.env.example
+
+# pnpm / 包管理器缓存
+.pnpm-store/
+
+# IntelliJ / WebStorm / VS Code
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 编辑器临时文件
+*.swp
+*.swo
+*~
