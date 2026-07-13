@@ -23,11 +23,7 @@ export function getAllRooms(): Map<string, Room> {
   return rooms;
 }
 
-export async function joinRoom(
-  resourceId: string,
-  ws: WebSocket,
-  userId: string,
-): Promise<Room> {
+export async function getOrCreateRoom(resourceId: string): Promise<Room> {
   let room = rooms.get(resourceId);
 
   // 如果房间不存在，则创建房间
@@ -182,6 +178,16 @@ export async function joinRoom(
     clearTimeout(room.idleTimer);
     room.idleTimer = null;
   }
+
+  return room;
+}
+
+export async function joinRoom(
+  resourceId: string,
+  ws: WebSocket,
+  userId: string,
+): Promise<Room> {
+  const room = await getOrCreateRoom(resourceId);
 
   if (ws.readyState !== WebSocket.OPEN) {
     console.log(`[Room] Ghost connection from ${userId} aborted before injecting into room.`);

@@ -1,6 +1,13 @@
 import { config } from '../config';
+import * as fs from 'fs';
 import * as os from 'os';
+import * as path from 'path';
 import { NacosNamingClient } from 'nacos';
+import {
+  buildGrayMetadata,
+  getDeveloperTag,
+  selectGrayInstancePool,
+} from '../clients/downstream-context';
 
 export let nacosNamingClient: any;
 
@@ -53,6 +60,139 @@ function resolveRegisterIp(): string {
   return fallbackIp;
 }
 
+function parseProperties(content: string): Record<string, string> {
+  const result: Record<string, string> = {};
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#') || line.startsWith('!')) continue;
+
+    const separatorIndex = line.search(/[=:]/);
+    if (separatorIndex < 0) continue;
+
+    const key = line.slice(0, separatorIndex).trim();
+    const value = line.slice(separatorIndex + 1).trim();
+    if (key) result[key] = value;
+  }
+
+  return result;
+}
+
+function getDevPropertiesCandidates(): string[] {
+  const candidates = [
+    path.resolve(process.cwd(), 'dev.properties'),
+    path.resolve(__dirname, '..', '..', 'dev.properties'),
+    path.resolve(process.cwd(), '..', 'dev.properties'),
+    path.resolve(__dirname, '..', '..', '..', 'dev.properties'),
+  ];
+  return Array.from(new Set(candidates));
+}
+
+function loadDeveloperNameFromDevProperties(devPropertiesPaths = getDevPropertiesCandidates()): string | undefined {
+  const devPropertiesPath = devPropertiesPaths.find((candidate) =>
+    fs.existsSync(candidate)
+  );
+  if (!devPropertiesPath) return undefined;
+
+  const properties = parseProperties(fs.readFileSync(devPropertiesPath, 'utf8'));
+  const enabled = properties['wisepen.developer.enable'] === 'true';
+  const developerName = properties['wisepen.developer.name']?.trim();
+  if (!enabled || !developerName) return undefined;
+
+  return developerName;
+}
+
+export function getLocalDeveloperName(): string | undefined {
+  return loadDeveloperNameFromDevProperties();
+}
+
+export function buildNacosMetadata(devPropertiesPaths = getDevPropertiesCandidates()): Record<string, string> {
+  return buildGrayMetadata(
+    {
+      'preserved.register.source': 'NODEJS',
+      version: '1.0.0',
+    },
+    loadDeveloperNameFromDevProperties(devPropertiesPaths),
+  );
+}
+
+export type DownstreamEndpoint = {
+  serviceName: string;
+  url: string;
+  source: 'override' | 'nacos';
+  target: 'override' | 'developer' | 'baseline';
+  developer?: string;
+};
+
+type NacosInstance = {
+  ip: string;
+  port: number;
+  metadata?: Record<string, string>;
+};
+
+function normalizeBaseUrl(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  return trimmed.replace(/\/+$/, '');
+}
+
+function resolveDeveloperForDownstream(): string | undefined {
+  return getDeveloperTag() ?? getLocalDeveloperName();
+}
+
+export function selectInstanceForDeveloper(
+  instances: NacosInstance[],
+  developer?: string,
+): { instance: NacosInstance; target: 'developer' | 'baseline' } {
+  const { instances: pool, target } = selectGrayInstancePool(instances, developer);
+  if (pool.length > 0) {
+    return {
+      instance: pool[Math.floor(Math.random() * pool.length)],
+      target,
+    };
+  }
+
+  throw new Error(`No gray-safe instances for developer=${developer ?? '-'}`);
+}
+
+async function resolveDownstreamEndpoint(
+  serviceName: string,
+  overrideEnvName: string,
+): Promise<DownstreamEndpoint> {
+  const developer = resolveDeveloperForDownstream();
+  const override = normalizeBaseUrl(process.env[overrideEnvName]);
+
+  if (override) {
+    return {
+      serviceName,
+      url: override,
+      source: 'override',
+      target: 'override',
+      developer,
+    };
+  }
+
+  if (!nacosNamingClient) throw new Error('Nacos Client uninitialized.');
+  const instances = await nacosNamingClient.selectInstances(
+    serviceName,
+    config.nacos.group,
+    'DEFAULT',
+    true
+  ) as NacosInstance[];
+  if (!instances || instances.length === 0) {
+    throw new Error(`No instances for ${serviceName}`);
+  }
+
+  const { instance, target } = selectInstanceForDeveloper(instances, developer);
+  return {
+    serviceName,
+    url: `http://${instance.ip}:${instance.port}`,
+    source: 'nacos',
+    target,
+    developer,
+  };
+}
+
 export async function registerWithNacos(): Promise<void> {
   try {
     if (!nacosNamingClient) {
@@ -67,6 +207,7 @@ export async function registerWithNacos(): Promise<void> {
     }
 
     const registerIp = resolveRegisterIp();
+    const metadata = buildNacosMetadata();
     await nacosNamingClient.registerInstance(config.serviceName, {
       ip: registerIp,
       port: config.port,
@@ -74,13 +215,13 @@ export async function registerWithNacos(): Promise<void> {
       enabled: true,
       weight: 1,
       groupName: config.nacos.group,
-      metadata: {
-        'preserved.register.source': 'NODEJS',
-        'version': '1.0.0'
-      }
+      metadata
     });
 
     console.log(`[Nacos] Registered at ${registerIp}:${config.port}`);
+    if (metadata.developer) {
+      console.log(`[Nacos] Developer metadata enabled: ${metadata.developer}`);
+    }
   } catch (err) {
     console.error('[Nacos] Registration failed, retrying...', err);
     setTimeout(registerWithNacos, 5000);
@@ -105,33 +246,19 @@ export async function deregisterFromNacos(): Promise<void> {
 }
 
 // 通过 Nacos 发现 Java 笔记服务
+export async function getNoteServiceEndpoint(): Promise<DownstreamEndpoint> {
+  return resolveDownstreamEndpoint(config.noteServiceName, 'NOTE_SERVICE_BASE_URL');
+}
+
 export async function getNoteServiceUrl(): Promise<string> {
-  if (!nacosNamingClient) throw new Error('Nacos Client uninitialized.');
-  const instances = await nacosNamingClient.selectInstances(
-    config.noteServiceName, 
-    config.nacos.group, 
-    'DEFAULT',
-    true
-  );
-  if (!instances || instances.length === 0) {
-    throw new Error(`No instances for ${config.noteServiceName}`);
-  }
-  const instance = instances[Math.floor(Math.random() * instances.length)];
-  return `http://${instance.ip}:${instance.port}`;
+  return (await getNoteServiceEndpoint()).url;
 }
 
 // 通过 Nacos 发现 Java 资源服务
+export async function getResourceServiceEndpoint(): Promise<DownstreamEndpoint> {
+  return resolveDownstreamEndpoint(config.resourceServiceName, 'RESOURCE_SERVICE_BASE_URL');
+}
+
 export async function getResourceServiceUrl(): Promise<string> {
-  if (!nacosNamingClient) throw new Error('Nacos Client uninitialized.');
-  const instances = await nacosNamingClient.selectInstances(
-    config.resourceServiceName, 
-    config.nacos.group, 
-    'DEFAULT',
-    true
-  );
-  if (!instances || instances.length === 0) {
-    throw new Error(`No instances for ${config.resourceServiceName}`);
-  }
-  const instance = instances[Math.floor(Math.random() * instances.length)];
-  return `http://${instance.ip}:${instance.port}`;
+  return (await getResourceServiceEndpoint()).url;
 }

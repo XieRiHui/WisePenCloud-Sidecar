@@ -8,24 +8,114 @@ import * as decoding from 'lib0/decoding';
 import { joinRoom, leaveRoom, getRoom } from './room-manager';
 import { parseIntent } from './protocol';
 import { checkPermission } from '../clients/note-service-client';
+import {
+  extractDeveloperFromHeaders,
+  extractDeveloperFromSearchParams,
+  runWithDownstreamContext,
+} from '../clients/downstream-context';
+import { config } from '../config';
 import { ClientIntent } from '../types';
 
 const connectionIntents = new WeakMap<WebSocket, ClientIntent[]>();
 const connectionWritable = new WeakMap<WebSocket, boolean>();
+
+type WsIdentitySource = 'header' | 'developer-query' | 'missing';
+
+type WsIdentity = {
+  userId: string;
+  groupRoleMapRaw: string;
+  source: WsIdentitySource;
+};
+
+const QUERY_USER_ID_KEYS = ['actorUserId', 'userId', 'x-user-id'];
+const QUERY_GROUP_ROLE_MAP_KEYS = ['groupRoleMap', 'x-group-role-map'];
+
+function headerString(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) {
+    return value[0]?.trim() ?? '';
+  }
+  return value?.trim() ?? '';
+}
+
+function firstSearchParam(searchParams: URLSearchParams, keys: string[]): string {
+  for (const key of keys) {
+    const value = searchParams.get(key)?.trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+function isDeveloperQueryIdentityAllowed(developer?: string): boolean {
+  const profile = String(config.profile ?? '').toLowerCase();
+  return Boolean(developer) && profile !== 'prod' && profile !== 'production';
+}
+
+function resolveWsIdentity(
+  req: IncomingMessage,
+  searchParams: URLSearchParams,
+  developer?: string,
+): WsIdentity {
+  const headerUserId = headerString(req.headers['x-user-id']);
+  const headerGroupRoleMap = headerString(req.headers['x-group-role-map']);
+  if (headerUserId) {
+    return {
+      userId: headerUserId,
+      groupRoleMapRaw: headerGroupRoleMap,
+      source: 'header',
+    };
+  }
+
+  if (isDeveloperQueryIdentityAllowed(developer)) {
+    return {
+      userId: firstSearchParam(searchParams, QUERY_USER_ID_KEYS),
+      groupRoleMapRaw: firstSearchParam(searchParams, QUERY_GROUP_ROLE_MAP_KEYS),
+      source: 'developer-query',
+    };
+  }
+
+  return {
+    userId: '',
+    groupRoleMapRaw: '',
+    source: 'missing',
+  };
+}
+
+function parseGroupRoleMap(raw: string, userId: string, resourceId: string): Record<string, string> {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    console.warn(`[WS] Invalid group role map`, { userId, resourceId });
+    throw err;
+  }
+}
 
 export function setupWebSocketServer(wss: WebSocketServer): void {
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
     const resourceId = url.searchParams.get('resourceId');
 
-    // 从 APISIX 透传的 Header 中提取用户信息 userId、groupRoleMap
-    const userId = req.headers['x-user-id'] as string;
-    const groupRoleMapStr = req.headers['x-group-role-map'] as string;
+    const developer =
+      extractDeveloperFromHeaders(req.headers) ??
+      extractDeveloperFromSearchParams(url.searchParams);
+    const identity = resolveWsIdentity(req, url.searchParams, developer);
+    const userId = identity.userId;
+    const groupRoleMapRaw = identity.groupRoleMapRaw;
 
     if (!resourceId || !userId) {
+      console.warn(`[WS] Reject connection: missing resourceId or userId`, {
+        hasResourceId: Boolean(resourceId),
+        hasUserId: Boolean(userId),
+        developer: developer ?? '-',
+        identitySource: identity.source,
+      });
       ws.close(4001, 'Missing resourceId or userId');
       return;
     }
+
+    console.log(
+      `[WS] Accepted connection room=${resourceId} user=${userId} developer=${developer ?? '-'} identity=${identity.source}`,
+    );
 
     // 引入消息缓冲区
     let isReady = false;
@@ -128,9 +218,9 @@ export function setupWebSocketServer(wss: WebSocketServer): void {
     });
 
     // 鉴权
-    (async () => {
+    runWithDownstreamContext({ developer }, async () => {
       try {
-        const groupRoleMap = groupRoleMapStr != null ? JSON.parse(groupRoleMapStr) : {};
+        const groupRoleMap = parseGroupRoleMap(groupRoleMapRaw, userId, resourceId);
         const { resourceAccessRole, allowedActions } = await checkPermission(resourceId, userId, groupRoleMap);
 
         if (resourceAccessRole === 'NONE') {
@@ -164,6 +254,6 @@ export function setupWebSocketServer(wss: WebSocketServer): void {
         processMessage(msg.rawData, msg.isBinary);
       }
 
-    })();
+    });
   });
 }

@@ -4,6 +4,7 @@ import { config, loadNacosConfig } from './config';
 import { setupWebSocketServer } from './ws/connection-handler';
 import { initKafkaProducer, disconnectKafka } from './clients/kafka-producer';
 import { registerWithNacos, deregisterFromNacos } from './nacos/registry';
+import { handleHttpRequest } from './aiNoteDiff/internalHttpRouter';
 
 async function main(): Promise<void> {
   // 从 Nacos 拉取远程配置
@@ -17,9 +18,14 @@ async function main(): Promise<void> {
   await initKafkaProducer();
 
   // 启动HTTP server
-  const server = http.createServer((_req, res) => {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', service: config.serviceName }));
+  const server = http.createServer((req, res) => {
+    handleHttpRequest(req, res).catch((err) => {
+      console.error('[HTTP] Unhandled request error', err);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      }
+      res.end(JSON.stringify({ code: 500, msg: 'internal_error', data: null }));
+    });
   });
 
   // 在 /note-collab/ws 路径上挂 WebSocket server

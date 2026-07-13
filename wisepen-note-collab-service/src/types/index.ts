@@ -12,6 +12,7 @@ export type OperationType =
   | 'PASTE'
   | 'UNDO'
   | 'REDO'
+  | 'AI_DIFF'
   | 'OTHER'
   | 'KEYBOARD';
 
